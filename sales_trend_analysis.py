@@ -158,6 +158,7 @@ def plot_top_sales_weeks(top_sales_weeks: pd.DataFrame) -> None:
     plt.close()
 
 def plot_store_average_sales(store_average_sales: pd.DataFrame) -> None:
+
     top_stores = store_average_sales.head(10)
 
     plt.figure(figsize=(10, 6))
@@ -176,8 +177,6 @@ def plot_store_average_sales(store_average_sales: pd.DataFrame) -> None:
     plt.close()
 
 def main() -> None:
-
-
 
     sales_df = load_data(DATA_DIR)
     dataset_summary = get_dataset_summary(sales_df)
