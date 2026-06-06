@@ -1,9 +1,14 @@
 from pathlib import Path
 
+import numpy as np
 import pandas as pd
 import matplotlib.pyplot as plt
 from matplotlib.ticker import FuncFormatter
+from statsmodels.graphics.tsaplots import plot_acf, plot_pacf
 from statsmodels.tsa.arima.model import ARIMA
+from statsmodels.tsa.stattools import adfuller
+from sklearn.metrics import mean_absolute_error, mean_squared_error
+from statsmodels.stats.diagnostic import acorr_ljungbox
 
 pd.options.display.float_format = "{:,.2f}".format
 
@@ -15,31 +20,11 @@ def load_data(data_dir: Path) -> pd.DataFrame:
 
     df = pd.read_csv(data_dir / 'Walmart_Sales.csv')
 
-    return df
+    df["Date"] = pd.to_datetime(df["Date"], dayfirst=True)
 
-def prepare_time_series(df: pd.DataFrame) -> pd.Series:
-
-    time_series_df = df.copy()
-
-    time_series_df["Date"] = pd.to_datetime(time_series_df["Date"], dayfirst=True)
-
-    weekly_sales = (
-        time_series_df.groupby("Date")["Weekly_Sales"]
-        .sum()
-        .sort_index()
-        .asfreq("W-FRI")
-    )
+    weekly_sales = df.groupby("Date")["Weekly_Sales"].sum().sort_index().asfreq("W-FRI")
 
     return weekly_sales
-
-def check_time_series(weekly_sales: pd.Series) -> None:
-
-    print("Time series shape:")
-    print(weekly_sales.shape)
-
-    print("\nDate range:")
-    print(f"start date: {weekly_sales.index.min().date()}")
-    print(f"end date: {weekly_sales.index.max().date()}")
 
 def format_sales_in_millions(value: float, position: int) -> str:
 
@@ -74,49 +59,195 @@ def split_time_series(weekly_sales: pd.Series, test_weeks: int = 12) -> tuple[pd
 
     return train_sales, test_sales
 
+def difference_series(series: pd.Series, d: int) ->pd.Series:
+
+    differenced_series = series.copy()
+
+    for _ in range(d):
+        differenced_series = differenced_series.diff().dropna()
+
+    return differenced_series
+
+def suggest_differencing_order(train_sales: pd.Series, max_d: int = 2,) -> int:
+
+    for d in range(max_d + 1):
+        candidate_series =difference_series(train_sales, d)
+
+        adf_result = adfuller(candidate_series, autolag="AIC",)
+
+        p_value = adf_result[1]
+
+        #print(f"ADF p-value for d={d}: {p_value:.6f}")
+
+        if p_value < 0.05:
+            return d
+
+    return max_d
+
+def plot_acf_chart(train_sales: pd.Series, d: int, lags: int = 52,) -> None:
+
+    stationary_sales = difference_series(train_sales, d)
+
+    max_lags = min(lags, len(stationary_sales) // 2 -1,)
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    plot_acf(stationary_sales, lags=max_lags, zero=False, ax=ax,)
+
+    ax.set_title(f"ACF of Training Sales After d={d} Differencing")
+
+    fig.tight_layout()
+
+    fig.savefig(PLOTS_DIR / f"acf_d{d}.png", dpi=300)
+
+    plt.close(fig)
+
+def plot_pacf_chart(train_sales: pd.Series, d: int, lags: int = 52,) -> None:
+
+    stationary_sales = difference_series(train_sales, d)
+
+    max_lags = min(lags, len(stationary_sales) // 2 -1,)
+
+    fig, ax = plt.subplots(figsize=(12, 6))
+
+    plot_pacf(stationary_sales, lags=max_lags, zero=False, ax=ax,)
+
+    ax.set_title(f"PACF of Training Sales After d={d} Differencing")
+
+    fig.tight_layout()
+
+    fig.savefig(PLOTS_DIR / f"pacf_d{d}.png", dpi=300)
+
+    plt.close(fig)
+
 def build_arima_forecast(
         train_sales: pd.Series,
         test_sales: pd.Series,
         order: tuple[int, int, int] = (1, 1, 1)
 ) -> tuple[object, pd.Series]:
 
-    model = ARIMA(train_sales, order=order)
-
-    fitted_model = model.fit()
+    fitted_model = ARIMA(train_sales, order=order).fit()
 
     forecast_values = fitted_model.forecast(steps=len(test_sales))
 
     forecast = pd.Series(forecast_values.to_numpy(), index=test_sales.index, name="ARIMA_Forecast")
 
-    return fitted_model, forecast
+    return forecast
+
+def compare_arima_models(
+    train_sales: pd.Series,
+    test_sales: pd.Series,
+    orders: list[tuple[int, int, int]],
+) -> pd.DataFrame:
+
+    model_results = []
+
+    for order in orders:
+        fitted_model = ARIMA(
+            train_sales,
+            order=order,
+        ).fit()
+
+        forecast = fitted_model.forecast(
+            steps=len(test_sales)
+        )
+
+        forecast.index = test_sales.index
+
+        mae = mean_absolute_error(
+            test_sales,
+            forecast,
+        )
+
+        rmse = np.sqrt(
+            mean_squared_error(
+                test_sales,
+                forecast,
+            )
+        )
+
+        mape = (
+            np.mean(
+                np.abs(
+                    (test_sales - forecast)
+                    / test_sales
+                )
+            )
+            * 100
+        )
+
+        p = order[0]
+        q = order[2]
+
+        ljung_box_result = acorr_ljungbox(
+            fitted_model.resid,
+            lags=[10],
+            model_df=p + q,
+            return_df=True,
+        )
+
+        ljung_box_p_value = (
+            ljung_box_result["lb_pvalue"].iloc[0]
+        )
+
+        model_results.append(
+            {
+                "Order": order,
+                "MAE": mae,
+                "RMSE": rmse,
+                "MAPE": mape,
+                "AIC": fitted_model.aic,
+                "BIC": fitted_model.bic,
+                "Ljung_Box_P_Value": ljung_box_p_value,
+            }
+        )
+
+    results_df = pd.DataFrame(model_results)
+
+    return results_df.sort_values(
+        by="RMSE"
+    )
 
 def main() -> None:
 
-    sales_df = load_data(DATA_DIR)
-    weekly_sales = prepare_time_series(sales_df)
-    check_time_series(weekly_sales)
-    plot_weekly_sales_time_series(weekly_sales)
-
+    weekly_sales = load_data(DATA_DIR)
     train_sales, test_sales = split_time_series(weekly_sales, test_weeks=12)
 
-    fitted_arima, arima_forecast = build_arima_forecast(train_sales, test_sales, order=(1, 1, 1))
+    d = suggest_differencing_order(weekly_sales)
 
-    comparison = pd.DataFrame({"Actual_Sales": test_sales, "Arima_Forecast": arima_forecast})
+    plot_weekly_sales_time_series(weekly_sales)
 
-    print("\nARIMA Forecast Comparison:")
-    print(comparison.to_string(float_format=lambda value: f"{value:,.2f}"))
+    plot_acf_chart(train_sales, d=d,)
+    plot_pacf_chart(train_sales, d=d,)
 
-    #print("First five weeks:")
-    #print(weekly_sales.head())
+    candidate_orders = [(1, d, 1), (1, d, 2)]
 
-    #print("\nLast five weeks:")
-    #print(weekly_sales.tail())
+    model_comparison = compare_arima_models(train_sales, test_sales, candidate_orders)
 
-    #print("\nNumber of weeks:")
-    #print(len(weekly_sales))
+    print("\nARIMA Model Comparison:")
 
-    #print("\nMissing sales values:")
-    #print(weekly_sales.isna().sum())
+    print(
+        model_comparison.to_string(
+            index=False,
+            formatters={
+                "MAE": lambda value: f"${value:,.2f}",
+                "RMSE": lambda value: f"${value:,.2f}",
+                "MAPE": lambda value: f"{value:.2f}%",
+                "AIC": lambda value: f"{value:,.2f}",
+                "BIC": lambda value: f"{value:,.2f}",
+            },
+        )
+    )
+
+    best_order = model_comparison.iloc[0]["Order"]
+    print(f"\nBest ARIMA order based on RMSE: {best_order}")
+
+    best_forecast = build_arima_forecast(train_sales, test_sales, best_order,)
+
+    forecast_comparison = pd.DataFrame({"Actual_Sales": test_sales, "ARIMA_Forecast": best_forecast,})
+
+    print("\nBest ARIMA Forecast Comparison:")
+    print(forecast_comparison.to_string(float_format=lambda value: f"{value:,.2f}"))
 
 if __name__ == '__main__':
     main()
