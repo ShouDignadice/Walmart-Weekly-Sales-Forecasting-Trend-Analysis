@@ -213,7 +213,7 @@ def main() -> None:
     weekly_sales = load_data(DATA_DIR)
     train_sales, test_sales = split_time_series(weekly_sales, test_weeks=12)
 
-    d = suggest_differencing_order(weekly_sales)
+    d = suggest_differencing_order(train_sales)
 
     plot_weekly_sales_time_series(weekly_sales)
 
